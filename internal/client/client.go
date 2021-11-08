@@ -9,6 +9,7 @@ import (
 	"chat/internal/pubsub"
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -115,9 +116,13 @@ func (c *client) connectionReader() {
 	defer close(c.readCh)
 
 	for {
-		msg := message.Message{}
-		err := c.connection.ReadJSON(&msg)
+		data, err := c.connection.Read()
 		if err != nil {
+			return
+		}
+
+		msg := message.Message{}
+		if err := json.Unmarshal(data, &msg); err != nil {
 			return
 		}
 
@@ -159,21 +164,23 @@ func (c *client) commandExecutor() {
 	for {
 		select {
 		case msg := <-c.readCh:
-			log.WithFields(log.Fields{
+			fields := log.Fields{
 				"type":     msg.Type,
 				"channel":  msg.Payload.Channel,
 				"from":     msg.Payload.From,
 				"message":  msg.Payload.Message,
 				"username": msg.Payload.Username,
-			}).Debug("channel message")
+			}
+
+			log.WithFields(fields).Debug("channel message")
 
 			err := c.execute(msg)
 			if err != nil {
-				log.WithError(err).Warn("executing command executor")
+				log.WithFields(fields).WithError(err).Warn("executing command executor")
 				return
 			}
 		case p := <-c.pubsubCh:
-			log.WithFields(log.Fields{
+			fields := log.Fields{
 				"command":   p.Command,
 				"channel":   p.Channel,
 				"from":      p.From,
@@ -181,12 +188,13 @@ func (c *client) commandExecutor() {
 				"message":   p.Message,
 				"sessionID": p.SessionID,
 				"createdAt": p.CreatedAt,
-			}).Debug("pubsub message")
+			}
+			log.WithFields(fields).Debug("pubsub message")
 
 			msg := message.FromPubSub(p)
 			err := c.execute(msg)
 			if err != nil {
-				log.WithError(err).Warn("executing command executor")
+				log.WithFields(fields).WithError(err).Warn("executing command executor")
 				return
 			}
 
@@ -206,21 +214,34 @@ func (c *client) inChannel(name string) bool {
 func (c *client) execute(msg message.Message) error {
 	switch msg.Type {
 	case message.JoinChannel:
-		err := c.joinChannel(msg)
-		if err != nil {
-			return err
-		}
-
+		return c.joinChannel(msg)
 	case message.ChannelMessage:
-		err := c.channelMessage(msg)
-		if err != nil {
-			return err
-		}
-
+		return c.channelMessage(msg)
+	case message.PrivateMessage:
+		return c.privateMessage(msg)
 	default:
 		reply := message.UnknownMessageType.Message()
 		c.EnqueueMessage(reply)
 	}
+	return nil
+}
+
+func (c *client) privateMessage(msg message.Message) error {
+	if !c.inChannel(msg.Payload.Channel) {
+		reply := message.NotInChannel.Message()
+		c.EnqueueMessage(reply)
+		return nil
+	}
+
+	if c.guest {
+		reply := message.GuestNotAllowed.Message()
+		c.EnqueueMessage(reply)
+		return nil
+	}
+
+	req := command.NewPrivateMessageReq(c.username, msg.Payload.Username, msg.Payload.Channel, msg.Payload.Message)
+	c.commandHandler.PrivateMessage(req)
+
 	return nil
 }
 

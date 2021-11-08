@@ -13,10 +13,13 @@ const (
 	JoinChannel        MessageType = "join_channel"
 	JoinedChannel      MessageType = "joined_channel"
 	ChannelMessage     MessageType = "channel_message"
+	PrivateMessage     MessageType = "private_message"
 	UnknownMessageType MessageType = "unknown_command"
 	AlreadyInChannel   MessageType = "already_in_channel"
 	NotInChannel       MessageType = "not_in_channel"
 	GuestNotAllowed    MessageType = "guest_not_allowed"
+	Ping               MessageType = "ping"
+	Pong               MessageType = "pong"
 )
 
 func (m MessageType) Message() Message {
@@ -51,6 +54,11 @@ func FromPubSub(pmsg pubsub.Message) Message {
 	switch pmsg.Command {
 	case pubsub.Broadcast:
 		msg.Type = ChannelMessage
+		msg.Payload.From = pmsg.From
+		msg.Payload.Channel = pmsg.Channel
+		msg.Payload.Message = pmsg.Message
+	case pubsub.PrivateMessage:
+		msg.Type = PrivateMessage
 		msg.Payload.From = pmsg.From
 		msg.Payload.Channel = pmsg.Channel
 		msg.Payload.Message = pmsg.Message

@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/nats-io/nats.go"
+	"github.com/sirupsen/logrus"
 )
 
 type Handler struct {
@@ -112,6 +113,39 @@ func (c *Handler) LeaveChannel(req LeaveChannelReq) {
 		return
 	}
 	ch.DelMember(req.username, req.sessionID)
+}
+
+type PrivateMessageReq struct {
+	from    string
+	to      string
+	channel string
+	message string
+}
+
+func NewPrivateMessageReq(from, to, channel, message string) PrivateMessageReq {
+	return PrivateMessageReq{from, to, channel, message}
+}
+
+func (c *Handler) PrivateMessage(req PrivateMessageReq) {
+	fields := logrus.Fields{
+		"from":    req.from,
+		"to":      req.to,
+		"channel": req.channel,
+		"message": req.message,
+	}
+
+	pmsg := pubsub.NewMessage(pubsub.PrivateMessage, req.from, req.to, req.message, "")
+	data, err := pmsg.Marshal()
+	if err != nil {
+		logrus.WithFields(fields).WithError(err).Warn("marshalling pubsub message")
+		return
+	}
+
+	subj := buildUserSubjectName(req.to, req.channel)
+	if err := c.natsConn.Publish(subj, data); err != nil {
+		logrus.WithFields(fields).WithError(err).Warn("publishing private message")
+		return
+	}
 }
 
 func buildUserSubjectName(username, channel string) string {

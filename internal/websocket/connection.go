@@ -9,6 +9,7 @@ import (
 //go:generate go run github.com/maxbrunsfeld/counterfeiter/v6 . Connection
 type Connection interface {
 	ReadJSON(v interface{}) error
+	Read() ([]byte, error)
 	WriteJSON(v interface{}) error
 	Context() context.Context
 	Close() error
@@ -48,4 +49,17 @@ func (uc *upgradedConnection) Context() context.Context {
 
 func (uc *upgradedConnection) Close() error {
 	return uc.conn.Close()
+}
+
+func (uc *upgradedConnection) Read() ([]byte, error) {
+	messageType, data, err := uc.conn.ReadMessage()
+	if err != nil {
+		return nil, err
+	}
+
+	if messageType != websocket.TextMessage {
+		return nil, nil
+	}
+
+	return data, nil
 }
