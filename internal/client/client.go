@@ -1,22 +1,24 @@
 package client
 
 import (
+	"chat/internal/auth"
 	"chat/internal/channel"
 	"chat/internal/command"
-	"chat/internal/keys"
+	"chat/internal/ctxkeys"
 	"chat/internal/message"
 	"chat/internal/pubsub"
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
-	"strconv"
 	"sync"
 
 	"chat/internal/websocket"
 
+	log "github.com/sirupsen/logrus"
+
 	"github.com/nats-io/nats.go"
-	"go.uber.org/zap"
 )
 
 type client struct {
@@ -32,6 +34,7 @@ type client struct {
 	id       int
 	username string
 	guest    bool
+	role     string
 
 	quitOnce     sync.Once
 	quitCh       chan struct{}
@@ -43,13 +46,10 @@ const (
 	readChannelBuffer = 1
 )
 
-func NewClient(connection websocket.Connection, channelManager *channel.Manager, natsConn *nats.Conn, clientID int, serverQuitCh chan struct{}) *client {
-	broker := pubsub.NewBroker(natsConn)
-	ch := command.NewHandler(natsConn, channelManager, &broker)
-
+func NewClient(connection websocket.Connection, channelManager *channel.Manager, natsConn *nats.Conn, broker *pubsub.Broker, clientID int, serverQuitCh chan struct{}) (*client, error) {
 	c := &client{
 		channels:       make(map[string]*nats.Subscription),
-		commandHandler: ch,
+		commandHandler: command.NewHandler(natsConn, channelManager, broker),
 		connection:     connection,
 		ctx:            connection.Context(),
 		id:             clientID,
@@ -60,50 +60,63 @@ func NewClient(connection websocket.Connection, channelManager *channel.Manager,
 		serverQuitCh:   serverQuitCh,
 	}
 
-	c.init()
-
-	return c
-}
-
-func (c *client) init() {
-	guestStr := c.ctx.Value(keys.GuestCtx).(string)
-	guest, _ := strconv.ParseBool(guestStr)
-
-	user := c.ctx.Value(keys.UsernameCtx).(string)
-	c.guest = guest
-
-	if guest {
-		user = c.generateGuestName()
+	if err := c.init(); err != nil {
+		return nil, err
 	}
 
-	c.username = user
+	return c, nil
 }
 
-func (c *client) generateGuestName() string {
+func (c *client) init() error {
+	val := c.ctx.Value(ctxkeys.User)
+	if val == nil {
+		name, err := c.generateGuestName()
+		if err != nil {
+			return err
+		}
+
+		c.username = name
+		c.guest = true
+		return nil
+	}
+
+	user, ok := val.(*auth.Context)
+	if !ok {
+		return errors.New("failed to cast context value to auth context")
+	}
+
+	c.username = user.Username
+	c.guest = false
+	c.role = user.Role
+
+	return nil
+}
+
+func (c *client) generateGuestName() (string, error) {
 	id := make([]byte, 2)
 	if _, err := io.ReadFull(rand.Reader, id); err != nil {
-		zap.L().Warn("generateName", zap.Error(err))
-		return ""
+		return "", err
 	}
-	return fmt.Sprintf("%x%d", id, c.id)
+	return fmt.Sprintf("guest%x%d", id, c.id), nil
 }
 
 func (c *client) Serve() {
 	defer c.leaveChannels()
 	defer c.close()
 
-	go c.messageReader()
+	go c.connectionReader()
 	go c.commandExecutor()
 
-	c.messageWriter()
+	c.connectionWriter()
 }
 
-func (c *client) messageReader() {
+func (c *client) connectionReader() {
 	defer c.close()
 	defer close(c.readCh)
 
 	for {
-		msg, err := c.readMessage()
+		msg := message.Message{}
+		err := c.connection.ReadJSON(&msg)
 		if err != nil {
 			return
 		}
@@ -118,12 +131,12 @@ func (c *client) messageReader() {
 	}
 }
 
-func (c *client) messageWriter() {
+func (c *client) connectionWriter() {
 	for {
 		select {
 		case msg := <-c.sendCh:
-			if err := c.writeMessage(msg); err != nil {
-				zap.L().Warn("writing conn reply", zap.Error(err))
+			if err := c.connection.WriteJSON(msg); err != nil {
+				log.WithError(err).Warn("writing conn reply")
 				return
 			}
 		case <-c.quitCh:
@@ -146,22 +159,37 @@ func (c *client) commandExecutor() {
 	for {
 		select {
 		case msg := <-c.readCh:
+			log.WithFields(log.Fields{
+				"type":     msg.Type,
+				"channel":  msg.Payload.Channel,
+				"from":     msg.Payload.From,
+				"message":  msg.Payload.Message,
+				"username": msg.Payload.Username,
+			}).Debug("channel message")
+
 			err := c.execute(msg)
 			if err != nil {
-				zap.L().Warn("executing command executor", zap.Error(err))
+				log.WithError(err).Warn("executing command executor")
 				return
 			}
 		case p := <-c.pubsubCh:
-			msg := c.parseBrokerMessage(p)
-			if msg == nil {
-				continue
-			}
+			log.WithFields(log.Fields{
+				"command":   p.Command,
+				"channel":   p.Channel,
+				"from":      p.From,
+				"to":        p.To,
+				"message":   p.Message,
+				"sessionID": p.SessionID,
+				"createdAt": p.CreatedAt,
+			}).Debug("pubsub message")
 
-			err := c.execute(*msg)
+			msg := message.FromPubSub(p)
+			err := c.execute(msg)
 			if err != nil {
-				zap.L().Warn("executing command executor", zap.Error(err))
+				log.WithError(err).Warn("executing command executor")
 				return
 			}
+
 		case <-c.quitCh:
 			return
 		case <-c.serverQuitCh:
@@ -182,11 +210,13 @@ func (c *client) execute(msg message.Message) error {
 		if err != nil {
 			return err
 		}
+
 	case message.ChannelMessage:
 		err := c.channelMessage(msg)
 		if err != nil {
 			return err
 		}
+
 	default:
 		reply := message.UnknownMessageType.Message()
 		c.EnqueueMessage(reply)
@@ -207,7 +237,7 @@ func (c *client) joinChannel(msg message.Message) error {
 		c.guest,
 		c.id,
 		c.EnqueueMessage,
-		c.forwardNatsMessageToClient,
+		c.faninToClient,
 	)
 
 	sub, err := c.commandHandler.JoinChannel(req)
@@ -261,43 +291,14 @@ func (c *client) leaveChannels() {
 		c.commandHandler.LeaveChannel(command.NewLeaveChannelReq(name, c.username, c.id))
 		if channel != nil {
 			if err := channel.Unsubscribe(); err != nil {
-				zap.L().Warn("unsubscribing channel", zap.Error(err))
+				log.WithError(err).Warn("unsubscribe channel")
 			}
 		}
 	}
 }
 
-func (c *client) writeMessage(msg message.Message) error {
-	err := c.connection.WriteJSON(&msg)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func (c *client) readMessage() (message.Message, error) {
-	msg := message.Message{}
-	if err := c.connection.ReadJSON(&msg); err != nil {
-		return msg, err
-	}
-	return msg, nil
-}
-
-func (c *client) forwardNatsMessageToClient(natsMsg *nats.Msg) {
+func (c *client) faninToClient(natsMsg *nats.Msg) {
 	pubsubMsg := pubsub.Message{}
 	pubsubMsg.Unmarshal(natsMsg.Data)
 	c.pubsubCh <- pubsubMsg
-}
-
-func (c *client) parseBrokerMessage(p pubsub.Message) *message.Message {
-	switch p.Command {
-	case pubsub.Broadcast:
-		msg := message.ChannelMessage.Message()
-		msg.Payload.Username = c.username
-		msg.Payload.Channel = p.Channel
-		msg.Payload.Message = p.Message
-		return &msg
-	default:
-		return nil
-	}
 }

@@ -1,26 +1,34 @@
 package main
 
 import (
+	"chat/internal/auth"
 	"chat/internal/server"
 	"flag"
+	"os"
 	"time"
 
 	"github.com/nats-io/nats.go"
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
+	log "github.com/sirupsen/logrus"
 )
 
-type asf struct {
-}
+var (
+	addr        = flag.String("addr", ":8080", "")
+	environment = "devel"
+)
 
 func init() {
-	config := zap.NewDevelopmentConfig()
-	config.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
-	logger, _ := config.Build()
-	_ = zap.ReplaceGlobals(logger)
-}
+	// config := zap.NewDevelopmentConfig()
+	// config.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
+	// logger, _ := config.Build()
+	// _ = zap.ReplaceGlobals(logger)
+	switch environment {
+	case "devel":
+		log.SetFormatter(&log.TextFormatter{})
+		log.SetLevel(log.DebugLevel)
+	}
 
-var addr = flag.String("addr", ":8080", "")
+	log.SetOutput(os.Stdout)
+}
 
 func main() {
 	flag.Parse()
@@ -30,14 +38,19 @@ func main() {
 	})
 
 	if err != nil {
-		zap.L().Fatal("nats connect", zap.Error(err))
+		log.Fatal(err)
 	}
 
+	jwt := auth.NewHS256Wrapper("test")
 	serverConfig := &server.Config{
 		NatsConn: nc,
 		Addr:     *addr,
 		Path:     "/",
+		Jwt:      jwt,
 	}
+
+	token, _ := jwt.Encode(auth.NewUserClaims("kasutaja123", "registered"))
+	log.Debug(token)
 
 	srv := server.NewServer(serverConfig)
 	srv.Start()

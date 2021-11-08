@@ -1,12 +1,11 @@
 package server
 
 import (
+	"chat/internal/auth"
 	"chat/internal/channel"
 	"chat/internal/client"
-	"chat/internal/keys"
+	"chat/internal/pubsub"
 	"chat/internal/websocket"
-	"context"
-	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
@@ -15,18 +14,22 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	log "github.com/sirupsen/logrus"
+
 	"github.com/nats-io/nats.go"
 	"go.uber.org/zap"
 )
 
 type Config struct {
 	NatsConn *nats.Conn
+	Jwt      auth.JWTWrapper
 	Addr     string
 	Path     string
 }
 
 type Server struct {
 	wsserver       websocket.Server
+	broker         pubsub.Broker
 	natsConn       *nats.Conn
 	channelManager *channel.Manager
 	connCh         chan websocket.Connection
@@ -40,13 +43,15 @@ func NewServer(conf *Config) *Server {
 	}
 
 	srv := &Server{
+		broker:         pubsub.NewBroker(conf.NatsConn),
 		quitCh:         make(chan struct{}),
 		channelManager: channel.NewChannelsManager(conf.NatsConn),
 		connCh:         make(chan websocket.Connection),
+		natsConn:       conf.NatsConn,
 	}
 
 	router := mux.NewRouter()
-	router.Use(contextMiddleware)
+	router.Use(auth.ContextMiddleware(conf.Jwt))
 	router.HandleFunc(conf.Path, srv.handler).Methods("GET")
 	wsserver := websocket.NewServer(router, conf.Addr)
 
@@ -59,7 +64,7 @@ func (s *Server) Start() {
 	defer s.close()
 
 	go s.wsserver.Serve()
-	go s.statsPrinter()
+	// go s.statsPrinter()
 	go s.emptyPurger()
 
 	sigchan := make(chan os.Signal, 1)
@@ -70,7 +75,11 @@ func (s *Server) Start() {
 		select {
 		case conn := <-s.connCh:
 			id++
-			client := client.NewClient(conn, s.channelManager, s.natsConn, id, s.quitCh)
+			client, err := client.NewClient(conn, s.channelManager, s.natsConn, &s.broker, id, s.quitCh)
+			if err != nil {
+				log.WithError(err).Warn("creating new client")
+			}
+
 			go client.Serve()
 		case <-sigchan:
 			return
@@ -81,27 +90,12 @@ func (s *Server) Start() {
 func (s *Server) printStats() {
 	memberCount := 0
 	channels := s.channelManager.List()
+
 	for _, channel := range channels {
 		memberCount += channel.CountMembers()
 	}
 
-	zap.L().Info(fmt.Sprintf("%d channels with total %d members", len(channels), memberCount))
-}
-
-// TODO temporary
-func contextMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-		var (
-			username = r.Header.Get("username")
-			guest    = r.Header.Get("guest")
-		)
-
-		ctx := r.Context()
-		ctx = context.WithValue(ctx, keys.UsernameCtx, username)
-		ctx = context.WithValue(ctx, keys.GuestCtx, guest)
-
-		next.ServeHTTP(rw, r.WithContext(ctx))
-	})
+	log.WithFields(log.Fields{"channels": len(channels), "members": memberCount}).Info("stats")
 }
 
 func (s *Server) handler(w http.ResponseWriter, r *http.Request) {

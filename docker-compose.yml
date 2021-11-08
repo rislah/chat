@@ -1,0 +1,9 @@
+service:
+  postgres:
+    image: postgres:latest
+    environment:
+       - POSTGRES_USER: dev
+       - POSTGRES_PASSWORD: parool
+       - POSTGRES_DATABASE: chat
+    ports:
+      - "5432:5432"

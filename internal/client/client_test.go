@@ -1,8 +1,9 @@
 package client
 
 import (
+	"chat/internal/channel"
 	"chat/internal/message"
-	channel "chat/internal/rework"
+	"chat/internal/pubsub"
 	"chat/internal/testutil"
 	"chat/internal/websocket/websocketfakes"
 	"testing"
@@ -46,7 +47,8 @@ func TestClient(t *testing.T) {
 
 			connection := &websocketfakes.FakeConnection{}
 			channelManager := channel.NewChannelsManager(nc)
-			client := NewClient(connection, channelManager, nc, 0, make(chan struct{}))
+			broker := pubsub.NewBroker(nc)
+			client, _ := NewClient(connection, channelManager, nc, &broker, 0, make(chan struct{}))
 			defer client.close()
 
 			testCase := clientTestCase{

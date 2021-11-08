@@ -3,8 +3,10 @@ package pubsub
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/nats-io/nats.go"
+	"go.uber.org/zap"
 )
 
 type Command string
@@ -55,6 +57,8 @@ func (b *Broker) SubscribeAsync(subject string, handler nats.MsgHandler) (*nats.
 		return nil, errors.New("subject is empty")
 	}
 
+	zap.L().Debug(fmt.Sprintf("subscribeAsync: subscribed to subject: %s", subject))
+
 	return b.conn.Subscribe(subject, handler)
 }
 
@@ -68,6 +72,8 @@ func (b *Broker) SubscribeChannel(subject string) (*nats.Subscription, chan *nat
 	if err != nil {
 		return nil, nil, err
 	}
+
+	zap.L().Debug(fmt.Sprintf("subscribeChannel: subscribed to subject: %s", subject))
 
 	return sub, ch, nil
 }

@@ -76,8 +76,14 @@ func NewChannelMessageReq(channel, from, sessionID, message string) ChannelMessa
 
 func (c *Handler) ChannelMessage(req ChannelMessageReq) error {
 	subject := buildChannelSubjectName(req.channel)
-	msg := pubsub.NewMessage(pubsub.Broadcast, req.from, "", req.message, req.sessionID)
-	b, err := msg.Marshal()
+	pmsg := pubsub.Message{
+		Command:   pubsub.Broadcast,
+		From:      req.from,
+		Channel:   req.channel,
+		Message:   req.message,
+		SessionID: req.sessionID,
+	}
+	b, err := pmsg.Marshal()
 	if err != nil {
 		return err
 	}

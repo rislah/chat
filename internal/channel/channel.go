@@ -6,7 +6,7 @@ import (
 	"sync"
 
 	"github.com/nats-io/nats.go"
-	"go.uber.org/zap"
+	log "github.com/sirupsen/logrus"
 )
 
 type Manager struct {
@@ -98,40 +98,35 @@ func (c *Channel) SetSub(sub *nats.Subscription) {
 }
 
 func (c *Channel) Broadcast(msg *nats.Msg) {
-	pm := pubsub.Message{}
-	err := pm.Unmarshal(msg.Data)
+	pmsg := pubsub.Message{}
+	err := pmsg.Unmarshal(msg.Data)
 	if err != nil {
-		zap.L().Warn("unmarshalling pubsub message", zap.Error(err))
-	}
-
-	switch pm.Command {
-	case pubsub.Broadcast:
-		m := message.Message{
-			Type: message.ChannelMessage,
-			Payload: message.MessagePayload{
-				Username: pm.From,
-				Channel:  pm.Channel,
-				Message:  pm.Message,
-			},
-		}
-
-		c.broadcast(m)
-	default:
+		log.WithError(err).Warn("unmarshal pubsub message")
 		return
 	}
+
+	m := message.FromPubSub(pmsg)
+	c.broadcast(m)
 }
 
 func (c *Channel) Close() {
 	if err := c.sub.Unsubscribe(); err != nil {
-		zap.L().Warn("unsubscribing channel", zap.Error(err))
+		log.WithError(err).Warn("unsubscribe channel")
 	}
 }
 
-func (c *Channel) broadcast(message message.Message) {
+func (c *Channel) broadcast(msg message.Message) {
+	log.WithFields(log.Fields{
+		"type":     msg.Type,
+		"channel":  msg.Payload.Channel,
+		"from":     msg.Payload.From,
+		"username": msg.Payload.Username,
+	}).Debug("broadcasting message")
+
 	members := c.members
 	for _, sessions := range members {
 		for _, send := range sessions {
-			send(message)
+			send(msg)
 		}
 	}
 }
