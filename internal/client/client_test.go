@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	natsserver "github.com/nats-io/nats-server/v2/server"
+	natsserver "github.com/nats-io/nats-chat/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -46,7 +46,7 @@ func TestClient(t *testing.T) {
 			defer nc.Close()
 
 			connection := &websocketfakes.FakeConnection{}
-			channelManager := channel.NewChannelsManager(nc)
+			channelManager := channel.NewManager(nc)
 			broker := pubsub.NewBroker(nc)
 			client, _ := NewClient(connection, channelManager, nc, &broker, 0, make(chan struct{}))
 			defer client.close()
@@ -68,7 +68,7 @@ func testClientJoinCommand(t *testing.T, testCase clientTestCase) {
 		numSubsStart = int(testCase.natsServer.NumSubscriptions())
 		msg          = message.Message{
 			Type: message.JoinChannel,
-			Payload: message.MessagePayload{
+			Payload: message.Payload{
 				Username: "test",
 				Channel:  "1",
 				IsGuest:  false,
@@ -79,7 +79,7 @@ func testClientJoinCommand(t *testing.T, testCase clientTestCase) {
 	err := testCase.client.execute(msg)
 	assert.NoError(t, err)
 
-	reply := <-testCase.client.sendCh
+	reply := <-testCase.client.writerCh
 	assert.Equal(t, message.JoinedChannel, reply.Type)
 	testutil.AssertNumSubscriptions(t, testCase.natsServer, numSubsStart+2)
 
@@ -88,7 +88,7 @@ func testClientJoinCommand(t *testing.T, testCase clientTestCase) {
 	members := ch.CountMembers()
 	assert.Equal(t, 1, members)
 
-	_, ok := testCase.client.channels[msg.Payload.Channel]
+	_, ok := testCase.client.connectedChannels[msg.Payload.Channel]
 	assert.True(t, ok)
 }
 
@@ -97,7 +97,7 @@ func testClientUnknownCommand(t *testing.T, testCase clientTestCase) {
 		numSubsStart = int(testCase.natsServer.NumSubscriptions())
 		msg          = message.Message{
 			Type: "asd",
-			Payload: message.MessagePayload{
+			Payload: message.Payload{
 				Username: "test",
 				Channel:  "1",
 				IsGuest:  false,
@@ -107,7 +107,7 @@ func testClientUnknownCommand(t *testing.T, testCase clientTestCase) {
 
 	err := testCase.client.execute(msg)
 	assert.NoError(t, err)
-	reply := <-testCase.client.sendCh
+	reply := <-testCase.client.writerCh
 	assert.Equal(t, message.UnknownMessageType, reply.Type)
 	testutil.AssertNumSubscriptions(t, testCase.natsServer, numSubsStart)
 }
@@ -117,7 +117,7 @@ func testClientClose(t *testing.T, testCase clientTestCase) {
 		numSubsStart = int(testCase.natsServer.NumSubscriptions())
 		msg          = message.Message{
 			Type: message.JoinChannel,
-			Payload: message.MessagePayload{
+			Payload: message.Payload{
 				Username: "test",
 				Channel:  "1",
 				IsGuest:  false,
@@ -127,12 +127,12 @@ func testClientClose(t *testing.T, testCase clientTestCase) {
 
 	err := testCase.client.execute(msg)
 	assert.NoError(t, err)
-	reply := <-testCase.client.sendCh
+	reply := <-testCase.client.writerCh
 
 	assert.Equal(t, message.JoinedChannel, reply.Type)
 	testutil.AssertNumSubscriptions(t, testCase.natsServer, numSubsStart+2)
 
-	connectedChannel, ok := testCase.client.channels[msg.Payload.Channel]
+	connectedChannel, ok := testCase.client.connectedChannels[msg.Payload.Channel]
 	assert.True(t, ok)
 	assert.True(t, connectedChannel.IsValid())
 
@@ -151,7 +151,7 @@ func testClientChannelMessage(t *testing.T, testCase clientTestCase) {
 		numSubsStart = int(testCase.natsServer.NumSubscriptions())
 		joinMessage  = message.Message{
 			Type: message.JoinChannel,
-			Payload: message.MessagePayload{
+			Payload: message.Payload{
 				Username: "test",
 				Channel:  "1",
 				IsGuest:  false,
@@ -159,7 +159,7 @@ func testClientChannelMessage(t *testing.T, testCase clientTestCase) {
 		}
 		channelMessage = message.Message{
 			Type: message.ChannelMessage,
-			Payload: message.MessagePayload{
+			Payload: message.Payload{
 				Username: "test",
 				Channel:  "1",
 				IsGuest:  false,
@@ -171,20 +171,20 @@ func testClientChannelMessage(t *testing.T, testCase clientTestCase) {
 	err := testCase.client.execute(joinMessage)
 	assert.NoError(t, err)
 
-	reply := <-testCase.client.sendCh
+	reply := <-testCase.client.writerCh
 	assert.Equal(t, message.JoinedChannel, reply.Type)
 	testutil.AssertNumSubscriptions(t, testCase.natsServer, numSubsStart+2)
 
-	_, ok := testCase.client.channels[joinMessage.Payload.Channel]
+	_, ok := testCase.client.connectedChannels[joinMessage.Payload.Channel]
 	assert.True(t, ok)
 
 	err = testCase.client.execute(channelMessage)
-	reply = <-testCase.client.sendCh
+	reply = <-testCase.client.writerCh
 	assert.NoError(t, err)
 	assert.Nil(t, reply)
 
 	select {
-	case msg := <-testCase.client.sendCh:
+	case msg := <-testCase.client.writerCh:
 		assert.Equal(t, channelMessage, msg)
 	case <-time.After(500 * time.Millisecond):
 		assert.Fail(t, "Timeout")

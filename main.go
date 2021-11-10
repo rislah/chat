@@ -2,7 +2,7 @@ package main
 
 import (
 	"chat/internal/auth"
-	"chat/internal/server"
+	"chat/internal/chat"
 	"flag"
 	"os"
 	"time"
@@ -42,16 +42,15 @@ func main() {
 	}
 
 	jwt := auth.NewHS256Wrapper("test")
-	serverConfig := &server.Config{
+	token, _ := jwt.Encode(auth.NewUserClaims("kasutaja123", "registered"))
+	log.Debug(token)
+
+	chatConfig := &chat.Config{
 		NatsConn: nc,
 		Addr:     *addr,
 		Path:     "/",
 		Jwt:      jwt,
 	}
-
-	token, _ := jwt.Encode(auth.NewUserClaims("kasutaja123", "registered"))
-	log.Debug(token)
-
-	srv := server.NewServer(serverConfig)
-	srv.Start()
+	ch := chat.New(chatConfig)
+	ch.Start()
 }

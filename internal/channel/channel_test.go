@@ -145,7 +145,7 @@ func TestChannelManager(t *testing.T) {
 			testCase := channelManagerTestCase{
 				natsConn:       nc,
 				natsServer:     srv,
-				channelManager: channel.NewChannelsManager(nc),
+				channelManager: channel.NewManager(nc),
 			}
 
 			test.test(t, testCase)

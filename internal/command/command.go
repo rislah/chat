@@ -19,7 +19,7 @@ func NewHandler(natsConn *nats.Conn, channelManager *channel.Manager, broker *pu
 	return &Handler{natsConn, channelManager, broker}
 }
 
-type UserJoinChannelReq struct {
+type JoinChannelReq struct {
 	username      string
 	channel       string
 	isGuest       bool
@@ -28,11 +28,18 @@ type UserJoinChannelReq struct {
 	subMsgHandler nats.MsgHandler
 }
 
-func NewUserJoinChannelReq(username string, channel string, guest bool, sessionID int, sendFn channel.MessageSendFn, msgHandler nats.MsgHandler) UserJoinChannelReq {
-	return UserJoinChannelReq{username, channel, guest, sessionID, sendFn, msgHandler}
+func NewJoinChannelReq(username string, channel string, guest bool, sessionID int, sendFn channel.MessageSendFn, msgHandler nats.MsgHandler) JoinChannelReq {
+	return JoinChannelReq{
+		username:      username,
+		channel:       channel,
+		isGuest:       guest,
+		sessionID:     sessionID,
+		messageSendFn: sendFn,
+		subMsgHandler: msgHandler,
+	}
 }
 
-func (cmd *Handler) JoinChannel(req UserJoinChannelReq) (*nats.Subscription, error) {
+func (cmd *Handler) JoinChannel(req JoinChannelReq) (*nats.Subscription, error) {
 	var (
 		err error
 		sub *nats.Subscription

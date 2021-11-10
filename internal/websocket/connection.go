@@ -2,22 +2,23 @@ package websocket
 
 import (
 	"context"
+	"sync"
 
 	"github.com/gorilla/websocket"
 )
 
 //go:generate go run github.com/maxbrunsfeld/counterfeiter/v6 . Connection
 type Connection interface {
-	ReadJSON(v interface{}) error
 	Read() ([]byte, error)
 	WriteJSON(v interface{}) error
 	Context() context.Context
-	Close() error
+	Close()
 }
 
 type upgradedConnection struct {
-	conn *websocket.Conn
-	ctx  context.Context
+	conn      *websocket.Conn
+	ctx       context.Context
+	closeOnce sync.Once
 }
 
 var _ Connection = &upgradedConnection{}
@@ -26,29 +27,18 @@ func NewUpgradedConnection(conn *websocket.Conn, ctx context.Context) *upgradedC
 	return &upgradedConnection{conn: conn, ctx: ctx}
 }
 
-func (uc *upgradedConnection) ReadJSON(v interface{}) error {
-	err := uc.conn.ReadJSON(v)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
 func (uc *upgradedConnection) WriteJSON(v interface{}) error {
-	if err := uc.conn.WriteJSON(v); err != nil {
-		return err
-	}
-
-	return nil
+	return uc.conn.WriteJSON(v)
 }
 
 func (uc *upgradedConnection) Context() context.Context {
 	return uc.ctx
 }
 
-func (uc *upgradedConnection) Close() error {
-	return uc.conn.Close()
+func (uc *upgradedConnection) Close() {
+	uc.closeOnce.Do(func() {
+		_ = uc.conn.Close()
+	})
 }
 
 func (uc *upgradedConnection) Read() ([]byte, error) {

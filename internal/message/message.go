@@ -7,28 +7,28 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
-type MessageType string
+type Type string
 
 const (
-	JoinChannel        MessageType = "join_channel"
-	JoinedChannel      MessageType = "joined_channel"
-	ChannelMessage     MessageType = "channel_message"
-	PrivateMessage     MessageType = "private_message"
-	UnknownMessageType MessageType = "unknown_command"
-	AlreadyInChannel   MessageType = "already_in_channel"
-	NotInChannel       MessageType = "not_in_channel"
-	GuestNotAllowed    MessageType = "guest_not_allowed"
-	Ping               MessageType = "ping"
-	Pong               MessageType = "pong"
+	JoinChannel        Type = "join_channel"
+	JoinedChannel      Type = "joined_channel"
+	ChannelMessage     Type = "channel_message"
+	PrivateMessage     Type = "private_message"
+	UnknownMessageType Type = "unknown_command"
+	AlreadyInChannel   Type = "already_in_channel"
+	NotInChannel       Type = "not_in_channel"
+	GuestNotAllowed    Type = "guest_not_allowed"
+	Ping               Type = "ping"
+	Pong               Type = "pong"
 )
 
-func (m MessageType) Message() Message {
+func (m Type) Message() Message {
 	return Message{Type: m}
 }
 
 type Message struct {
-	Type    MessageType    `json:"type"`
-	Payload MessagePayload `json:"payload"`
+	Type    Type    `json:"type"`
+	Payload Payload `json:"payload,omitempty"`
 }
 
 func (m Message) MarshalLogObject(encoder zapcore.ObjectEncoder) error {
@@ -66,7 +66,7 @@ func FromPubSub(pmsg pubsub.Message) Message {
 	return msg
 }
 
-type MessagePayload struct {
+type Payload struct {
 	Username string `json:"username,omitempty"`
 	From     string `json:"from,omitempty"`
 	Channel  string `json:"channel,omitempty"`

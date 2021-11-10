@@ -32,7 +32,7 @@ func StartNatsServer(opts *natsserver.Options) (*natsserver.Server, error) {
 	go srv.Start()
 
 	if !srv.ReadyForConnections(10 * time.Second) {
-		panic("unable to start nats server")
+		panic("unable to start nats chat")
 	}
 
 	return srv, nil

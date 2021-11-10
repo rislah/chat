@@ -1,18 +1,10 @@
 package client
 
 import (
-	"chat/internal/auth"
-	"chat/internal/channel"
 	"chat/internal/command"
-	"chat/internal/ctxkeys"
 	"chat/internal/message"
 	"chat/internal/pubsub"
-	"context"
-	"crypto/rand"
 	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
 	"sync"
 
 	"chat/internal/websocket"
@@ -22,20 +14,23 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
+type connectedChannel struct {
+	sessionID          int
+	clientSubscription *nats.Subscription
+}
+
 type client struct {
-	connection     websocket.Connection
+	websocketConn  websocket.Connection
 	commandHandler *command.Handler
-	channels       map[string]*nats.Subscription
+	// map key is channel name
+	connectedChannels map[string]connectedChannel
 
-	sendCh   chan message.Message
-	readCh   chan message.Message
-	pubsubCh chan pubsub.Message
+	writerCh  chan message.Message
+	messageCh chan message.Message
+	pubsubCh  chan pubsub.Message
 
-	ctx      context.Context
-	id       int
-	username string
-	guest    bool
-	role     string
+	user     user
+	clientID int
 
 	quitOnce     sync.Once
 	quitCh       chan struct{}
@@ -47,78 +42,77 @@ const (
 	readChannelBuffer = 1
 )
 
-func NewClient(connection websocket.Connection, channelManager *channel.Manager, natsConn *nats.Conn, broker *pubsub.Broker, clientID int, serverQuitCh chan struct{}) (*client, error) {
-	c := &client{
-		channels:       make(map[string]*nats.Subscription),
-		commandHandler: command.NewHandler(natsConn, channelManager, broker),
-		connection:     connection,
-		ctx:            connection.Context(),
-		id:             clientID,
-		pubsubCh:       make(chan pubsub.Message, readChannelBuffer),
-		quitCh:         make(chan struct{}),
-		readCh:         make(chan message.Message, readChannelBuffer),
-		sendCh:         make(chan message.Message, sendChannelBuffer),
-		serverQuitCh:   serverQuitCh,
-	}
-
-	if err := c.init(); err != nil {
+func NewClient(connection websocket.Connection, ch *command.Handler, clientID int, serverQuitCh chan struct{}) (*client, error) {
+	usr := user{}
+	if err := usr.newFromCtx(connection.Context()); err != nil {
 		return nil, err
 	}
 
-	return c, nil
+	return &client{
+		connectedChannels: make(map[string]connectedChannel),
+		websocketConn:     connection,
+		clientID:          clientID,
+		commandHandler:    ch,
+		pubsubCh:          make(chan pubsub.Message, readChannelBuffer),
+		quitCh:            make(chan struct{}),
+		messageCh:         make(chan message.Message, readChannelBuffer),
+		writerCh:          make(chan message.Message, sendChannelBuffer),
+		serverQuitCh:      serverQuitCh,
+		user:              usr,
+	}, nil
 }
 
-func (c *client) init() error {
-	val := c.ctx.Value(ctxkeys.User)
-	if val == nil {
-		name, err := c.generateGuestName()
-		if err != nil {
-			return err
+func (c *client) close() {
+	c.quitOnce.Do(func() { close(c.quitCh) })
+	c.websocketConn.Close()
+}
+
+func (c *client) leaveChannels() {
+	for name, conn := range c.connectedChannels {
+		if conn.clientSubscription != nil {
+			if err := conn.clientSubscription.Unsubscribe(); err != nil {
+				log.WithError(err).Error("unsubscribing channel")
+			}
 		}
 
-		c.username = name
-		c.guest = true
-		return nil
+		req := command.NewLeaveChannelReq(name, c.user.username, conn.sessionID)
+		c.commandHandler.LeaveChannel(req)
 	}
-
-	user, ok := val.(*auth.Context)
-	if !ok {
-		return errors.New("failed to cast context value to auth context")
-	}
-
-	c.username = user.Username
-	c.guest = false
-	c.role = user.Role
-
-	return nil
-}
-
-func (c *client) generateGuestName() (string, error) {
-	id := make([]byte, 2)
-	if _, err := io.ReadFull(rand.Reader, id); err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("guest%x%d", id, c.id), nil
 }
 
 func (c *client) Serve() {
-	defer c.leaveChannels()
 	defer c.close()
+	defer c.leaveChannels()
 
 	go c.connectionReader()
+	go c.pubsubReader()
 	go c.commandExecutor()
 
-	c.connectionWriter()
+	for {
+		select {
+		case msg := <-c.writerCh:
+			if err := c.websocketConn.WriteJSON(msg); err != nil {
+				log.WithError(err).Error("writing reply")
+				return
+			}
+		case <-c.quitCh:
+			return
+		}
+	}
 }
 
 func (c *client) connectionReader() {
 	defer c.close()
-	defer close(c.readCh)
+	defer close(c.messageCh)
 
 	for {
-		data, err := c.connection.Read()
+		data, err := c.websocketConn.Read()
 		if err != nil {
 			return
+		}
+
+		if data == nil {
+			continue
 		}
 
 		msg := message.Message{}
@@ -127,23 +121,7 @@ func (c *client) connectionReader() {
 		}
 
 		select {
-		case c.readCh <- msg:
-		case <-c.quitCh:
-			return
-		case <-c.serverQuitCh:
-			return
-		}
-	}
-}
-
-func (c *client) connectionWriter() {
-	for {
-		select {
-		case msg := <-c.sendCh:
-			if err := c.connection.WriteJSON(msg); err != nil {
-				log.WithError(err).Warn("writing conn reply")
-				return
-			}
+		case c.messageCh <- msg:
 		case <-c.quitCh:
 			return
 		case <-c.serverQuitCh:
@@ -154,16 +132,40 @@ func (c *client) connectionWriter() {
 
 func (c *client) EnqueueMessage(msg message.Message) {
 	select {
-	case c.sendCh <- msg:
+	case c.writerCh <- msg:
 	default:
+		// buffer is full
 		c.close()
+	}
+}
+
+func (c *client) pubsubReader() {
+	for {
+		select {
+		case p := <-c.pubsubCh:
+			fields := log.Fields{
+				"command":   p.Command,
+				"channel":   p.Channel,
+				"from":      p.From,
+				"to":        p.To,
+				"message":   p.Message,
+				"sessionID": p.SessionID,
+				"createdAt": p.CreatedAt,
+			}
+			log.WithFields(fields).Debug("pubsub message")
+
+			msg := message.FromPubSub(p)
+			c.messageCh <- msg
+		case <-c.quitCh:
+			return
+		}
 	}
 }
 
 func (c *client) commandExecutor() {
 	for {
 		select {
-		case msg := <-c.readCh:
+		case msg := <-c.messageCh:
 			fields := log.Fields{
 				"type":     msg.Type,
 				"channel":  msg.Payload.Channel,
@@ -179,36 +181,12 @@ func (c *client) commandExecutor() {
 				log.WithFields(fields).WithError(err).Warn("executing command executor")
 				return
 			}
-		case p := <-c.pubsubCh:
-			fields := log.Fields{
-				"command":   p.Command,
-				"channel":   p.Channel,
-				"from":      p.From,
-				"to":        p.To,
-				"message":   p.Message,
-				"sessionID": p.SessionID,
-				"createdAt": p.CreatedAt,
-			}
-			log.WithFields(fields).Debug("pubsub message")
-
-			msg := message.FromPubSub(p)
-			err := c.execute(msg)
-			if err != nil {
-				log.WithFields(fields).WithError(err).Warn("executing command executor")
-				return
-			}
-
 		case <-c.quitCh:
 			return
 		case <-c.serverQuitCh:
 			return
 		}
 	}
-}
-
-func (c *client) inChannel(name string) bool {
-	_, ok := c.channels[name]
-	return ok
 }
 
 func (c *client) execute(msg message.Message) error {
@@ -227,36 +205,40 @@ func (c *client) execute(msg message.Message) error {
 }
 
 func (c *client) privateMessage(msg message.Message) error {
-	if !c.inChannel(msg.Payload.Channel) {
+	_, inChannel := c.connectedChannels[msg.Payload.Channel]
+	if !inChannel {
 		reply := message.NotInChannel.Message()
 		c.EnqueueMessage(reply)
 		return nil
 	}
 
-	if c.guest {
+	if c.user.guest {
 		reply := message.GuestNotAllowed.Message()
 		c.EnqueueMessage(reply)
 		return nil
 	}
 
-	req := command.NewPrivateMessageReq(c.username, msg.Payload.Username, msg.Payload.Channel, msg.Payload.Message)
+	req := command.NewPrivateMessageReq(c.user.username, msg.Payload.Username, msg.Payload.Channel, msg.Payload.Message)
 	c.commandHandler.PrivateMessage(req)
 
 	return nil
 }
 
 func (c *client) joinChannel(msg message.Message) error {
-	if c.inChannel(msg.Payload.Channel) {
+	_, inChannel := c.connectedChannels[msg.Payload.Channel]
+	if inChannel {
 		reply := message.AlreadyInChannel.Message()
 		c.EnqueueMessage(reply)
 		return nil
 	}
 
-	req := command.NewUserJoinChannelReq(
-		c.username,
+	sessionID := len(c.connectedChannels) + 1
+
+	req := command.NewJoinChannelReq(
+		c.user.username,
 		msg.Payload.Channel,
-		c.guest,
-		c.id,
+		c.user.guest,
+		sessionID,
 		c.EnqueueMessage,
 		c.faninToClient,
 	)
@@ -266,11 +248,14 @@ func (c *client) joinChannel(msg message.Message) error {
 		return err
 	}
 
-	c.channels[msg.Payload.Channel] = sub
+	c.connectedChannels[msg.Payload.Channel] = connectedChannel{
+		sessionID:          sessionID,
+		clientSubscription: sub,
+	}
 
 	reply := message.Message{Type: message.JoinedChannel,
-		Payload: message.MessagePayload{
-			Username: c.username,
+		Payload: message.Payload{
+			Username: c.user.username,
 			Channel:  msg.Payload.Channel,
 		},
 	}
@@ -281,19 +266,20 @@ func (c *client) joinChannel(msg message.Message) error {
 }
 
 func (c *client) channelMessage(msg message.Message) error {
-	if c.guest {
+	if c.user.guest {
 		reply := message.GuestNotAllowed.Message()
 		c.EnqueueMessage(reply)
 		return nil
 	}
 
-	if !c.inChannel(msg.Payload.Channel) {
+	_, inChannel := c.connectedChannels[msg.Payload.Channel]
+	if !inChannel {
 		reply := message.NotInChannel.Message()
 		c.EnqueueMessage(reply)
 		return nil
 	}
 
-	req := command.NewChannelMessageReq(msg.Payload.Channel, c.username, "", msg.Payload.Message)
+	req := command.NewChannelMessageReq(msg.Payload.Channel, c.user.username, "", msg.Payload.Message)
 	err := c.commandHandler.ChannelMessage(req)
 	if err != nil {
 		return err
@@ -302,24 +288,11 @@ func (c *client) channelMessage(msg message.Message) error {
 	return nil
 }
 
-func (c *client) close() {
-	c.quitOnce.Do(func() { close(c.quitCh) })
-	_ = c.connection.Close()
-}
-
-func (c *client) leaveChannels() {
-	for name, channel := range c.channels {
-		c.commandHandler.LeaveChannel(command.NewLeaveChannelReq(name, c.username, c.id))
-		if channel != nil {
-			if err := channel.Unsubscribe(); err != nil {
-				log.WithError(err).Warn("unsubscribe channel")
-			}
-		}
+func (c *client) faninToClient(nm *nats.Msg) {
+	msg := pubsub.Message{}
+	if err := msg.Unmarshal(nm.Data); err != nil {
+		log.WithError(err).Error("unmarshalling pubsub message")
+		return
 	}
-}
-
-func (c *client) faninToClient(natsMsg *nats.Msg) {
-	pubsubMsg := pubsub.Message{}
-	pubsubMsg.Unmarshal(natsMsg.Data)
-	c.pubsubCh <- pubsubMsg
+	c.pubsubCh <- msg
 }

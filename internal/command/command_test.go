@@ -51,7 +51,7 @@ func TestCommand(t *testing.T) {
 
 			defer nc.Close()
 
-			channelManager := channel.NewChannelsManager(nc)
+			channelManager := channel.NewManager(nc)
 			broker := pubsub.NewBroker(nc)
 			testCase := commandTestCase{
 				natsConn:       nc,
@@ -75,7 +75,7 @@ func testJoinChannelUser(t *testing.T, testCase commandTestCase) {
 		guest        = false
 		sender       = &fakeSender{}
 		numSubsStart = int(testCase.natsServer.NumSubscriptions())
-		req          = command.NewUserJoinChannelReq(username, channelname, guest, sessionID, sender.Send, msgHandler)
+		req          = command.NewJoinChannelReq(username, channelname, guest, sessionID, sender.Send, msgHandler)
 	)
 
 	sub, err := testCase.cmd.JoinChannel(req)
@@ -97,7 +97,7 @@ func testJoinChannelGuest(t *testing.T, testCase commandTestCase) {
 		guest        = true
 		sender       = &fakeSender{}
 		numSubsStart = int(testCase.natsServer.NumSubscriptions())
-		req          = command.NewUserJoinChannelReq(username, channelname, guest, sessionID, sender.Send, msgHandler)
+		req          = command.NewJoinChannelReq(username, channelname, guest, sessionID, sender.Send, msgHandler)
 	)
 
 	sub, err := testCase.cmd.JoinChannel(req)
@@ -120,7 +120,7 @@ func testChannelMessage(t *testing.T, testCase commandTestCase) {
 		sender       = &fakeSender{}
 		msg          = "foo"
 		numSubsStart = int(testCase.natsServer.NumSubscriptions())
-		req          = command.NewUserJoinChannelReq(username, channelname, guest, sessionID, sender.Send, msgHandler)
+		req          = command.NewJoinChannelReq(username, channelname, guest, sessionID, sender.Send, msgHandler)
 	)
 
 	sub, err := testCase.cmd.JoinChannel(req)

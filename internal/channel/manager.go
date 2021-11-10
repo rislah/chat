@@ -9,10 +9,11 @@ import (
 type Manager struct {
 	nc       *nats.Conn
 	channels map[string]*Channel
-	mu       sync.RWMutex
+
+	mu sync.RWMutex
 }
 
-func NewChannelsManager(nc *nats.Conn) *Manager {
+func NewManager(nc *nats.Conn) *Manager {
 	return &Manager{
 		nc:       nc,
 		channels: make(map[string]*Channel),
@@ -65,10 +66,10 @@ func (cm *Manager) PurgeEmpty() {
 	cm.mu.RUnlock()
 
 	if len(channelsToRemove) > 0 {
-		cm.mu.Lock()
 		for _, channelToRemove := range channelsToRemove {
+			cm.mu.Lock()
 			delete(cm.channels, channelToRemove)
+			cm.mu.Unlock()
 		}
-		cm.mu.Unlock()
 	}
 }

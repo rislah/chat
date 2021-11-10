@@ -18,7 +18,7 @@ const (
 type Server interface {
 	Close()
 	Upgrade(rw http.ResponseWriter, r *http.Request, header http.Header) (Connection, error)
-	Serve()
+	ListenAndServe()
 }
 
 type websocketServerImpl struct {
@@ -48,7 +48,7 @@ func NewServer(mux *mux.Router, addr string) *websocketServerImpl {
 	}
 }
 
-func (ws *websocketServerImpl) Serve() {
+func (ws *websocketServerImpl) ListenAndServe() {
 	listener, err := net.Listen("tcp", ws.addr)
 	if err != nil {
 		log.Fatal(err)
@@ -73,5 +73,5 @@ func (ws *websocketServerImpl) Upgrade(rw http.ResponseWriter, r *http.Request, 
 }
 
 func (ws *websocketServerImpl) Close() {
-	ws.listener.Close()
+	_ = ws.listener.Close()
 }

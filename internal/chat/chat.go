@@ -1,11 +1,13 @@
-package server
+package chat
 
 import (
 	"chat/internal/auth"
 	"chat/internal/channel"
 	"chat/internal/client"
+	"chat/internal/command"
 	"chat/internal/pubsub"
 	"chat/internal/websocket"
+	"github.com/gorilla/mux"
 	"net/http"
 	"os"
 	"os/signal"
@@ -13,11 +15,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gorilla/mux"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/nats-io/nats.go"
-	"go.uber.org/zap"
 )
 
 type Config struct {
@@ -27,97 +27,104 @@ type Config struct {
 	Path     string
 }
 
-type Server struct {
+type Chat struct {
 	wsserver       websocket.Server
 	broker         pubsub.Broker
 	natsConn       *nats.Conn
 	channelManager *channel.Manager
+	commandHandler *command.Handler
 	connCh         chan websocket.Connection
 	quitCh         chan struct{}
 	quitOnce       sync.Once
 }
 
-func NewServer(conf *Config) *Server {
+func New(conf *Config) *Chat {
 	if conf == nil {
 		panic("conf must not be nil")
 	}
 
-	srv := &Server{
-		broker:         pubsub.NewBroker(conf.NatsConn),
+	cm := channel.NewManager(conf.NatsConn)
+	broker := pubsub.NewBroker(conf.NatsConn)
+	ch := command.NewHandler(conf.NatsConn, cm, &broker)
+
+	chat := &Chat{
+		broker:         broker,
 		quitCh:         make(chan struct{}),
-		channelManager: channel.NewChannelsManager(conf.NatsConn),
+		channelManager: cm,
+		commandHandler: ch,
 		connCh:         make(chan websocket.Connection),
 		natsConn:       conf.NatsConn,
 	}
 
 	router := mux.NewRouter()
 	router.Use(auth.ContextMiddleware(conf.Jwt))
-	router.HandleFunc(conf.Path, srv.handler).Methods("GET")
-	wsserver := websocket.NewServer(router, conf.Addr)
+	router.Handle("/", chat).Methods("GET")
 
-	srv.wsserver = wsserver
+	srv := websocket.NewServer(router, conf.Addr)
+	srv.ListenAndServe()
 
-	return srv
+	chat.wsserver = srv
+
+	return chat
 }
 
-func (s *Server) Start() {
-	defer s.close()
-
-	go s.wsserver.Serve()
-	// go s.statsPrinter()
-	go s.emptyPurger()
-
-	sigchan := make(chan os.Signal, 1)
-	signal.Notify(sigchan, syscall.SIGTERM, syscall.SIGINT, syscall.SIGUSR1, syscall.SIGUSR2)
-
-	var id int
-	for {
-		select {
-		case conn := <-s.connCh:
-			id++
-			client, err := client.NewClient(conn, s.channelManager, s.natsConn, &s.broker, id, s.quitCh)
-			if err != nil {
-				log.WithError(err).Warn("creating new client")
-			}
-
-			go client.Serve()
-		case <-sigchan:
-			return
-		}
-	}
-}
-
-func (s *Server) printStats() {
-	memberCount := 0
-	channels := s.channelManager.List()
-
-	for _, channel := range channels {
-		memberCount += channel.CountMembers()
-	}
-
-	log.WithFields(log.Fields{"channels": len(channels), "members": memberCount}).Info("stats")
-}
-
-func (s *Server) handler(w http.ResponseWriter, r *http.Request) {
+func (s *Chat) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	conn, err := s.wsserver.Upgrade(w, r, http.Header{})
 	if err != nil {
-		zap.L().Warn("upgrading connection", zap.Error(err))
+		log.WithError(err).Error("upgrading connection")
 		return
 	}
 
 	s.connCh <- conn
 }
 
-func (s *Server) close() {
-	s.quitOnce.Do(func() { close(s.quitCh) })
-	s.wsserver.Close()
-	channels := s.channelManager.List()
-	for _, channel := range channels {
-		channel.Close()
+func (s *Chat) Start() {
+	defer s.close()
+
+	go s.emptyPurger()
+	// go s.statsPrinter()
+
+	sigC := make(chan os.Signal, 1)
+	signal.Notify(sigC, syscall.SIGTERM, syscall.SIGINT, syscall.SIGUSR1, syscall.SIGUSR2)
+
+	var id int
+	for {
+		select {
+		case conn := <-s.connCh:
+			id++
+			c, err := client.NewClient(conn, s.commandHandler, id, s.quitCh)
+			if err != nil {
+				log.WithError(err).Warn("creating new client")
+			}
+
+			go c.Serve()
+		case <-sigC:
+			return
+		}
 	}
 }
 
-func (s *Server) statsPrinter() {
+func (s *Chat) printStats() {
+	memberCount := 0
+	channels := s.channelManager.List()
+
+	for _, ch := range channels {
+		memberCount += ch.CountMembers()
+	}
+
+	log.WithFields(log.Fields{"channels": len(channels), "members": memberCount}).Info("stats")
+}
+
+func (s *Chat) close() {
+	s.quitOnce.Do(func() { close(s.quitCh) })
+	s.wsserver.Close()
+	channels := s.channelManager.List()
+	for _, ch := range channels {
+		ch.Close()
+	}
+}
+
+func (s *Chat) statsPrinter() {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -130,7 +137,7 @@ func (s *Server) statsPrinter() {
 	}
 }
 
-func (s *Server) emptyPurger() {
+func (s *Chat) emptyPurger() {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
